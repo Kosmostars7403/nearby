@@ -51,6 +51,27 @@ public class ConnectionManager {
     self.queue = queue
   }
 
+  private var wifiHotspotSessionID: String?
+
+  /// Allows one iOS system Wi-Fi join prompt for this explicit connection run.
+  /// Automatic bandwidth retries cannot create another prompt. The handler is
+  /// invoked only for NEHotspotConfigurationError.userDenied, on the main queue.
+  public func beginWifiHotspotSession(userDeniedHandler: @escaping () -> Void) {
+    guard wifiHotspotSessionID == nil else { return }
+    let identifier = UUID().uuidString
+    wifiHotspotSessionID = identifier
+    GNCBeginWifiHotspotSession(identifier, userDeniedHandler)
+  }
+
+  /// Invalidates callbacks from this run without cancelling a pending OS dialog.
+  public func endWifiHotspotSession() {
+    guard let identifier = wifiHotspotSessionID else { return }
+    wifiHotspotSessionID = nil
+    GNCEndWifiHotspotSession(identifier)
+  }
+
+  deinit { endWifiHotspotSession() }
+
   /// Sends a message as `Data` to nearby endpoints.
   ///
   /// This method is asynchronous (nonblocking).

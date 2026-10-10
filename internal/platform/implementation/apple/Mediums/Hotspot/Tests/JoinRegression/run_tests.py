@@ -24,7 +24,7 @@ out = args.output_dir or Path(tempfile.mkdtemp(prefix='nearby-hotspot-join-tests
 out.mkdir(parents=True, exist_ok=True)
 constants = text[text.index('#if TARGET_OS_IOS', text.index('NS_ASSUME_NONNULL_BEGIN')):text.index('@interface GNCHotspotMedium ()')]
 start = text.index('- (BOOL)connectToWifiNetworkWithSSID:')
-end = text.index('- (void)disconnectToWifiNetworkWithSSID:', start)
+end = text.index('- (nullable GNCNWFrameworkSocket *)connectToHost:', start)
 methods = text[start:end]
 # The join gate, both connect selectors, and SSID lookup methods are copied
 # verbatim; only their OS API/monotonic clock boundaries are replaced.

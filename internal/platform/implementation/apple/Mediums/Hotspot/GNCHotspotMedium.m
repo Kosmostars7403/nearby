@@ -48,6 +48,20 @@ static const UInt8 kConnectionTimeoutInSeconds = 2;
 static const UInt8 kConnectionToHostTimeoutInSeconds = 10;
 
 #if TARGET_OS_IOS
+#define GNC_HOTSPOT_CONSENT_SESSION 1
+// A run represents explicit application consent to one system join prompt.
+@interface GNCHotspotConsentRun : NSObject
+@property(nonatomic, copy) NSString *identifier;
+@property(atomic) BOOL active;
+@property(atomic) BOOL denied;
+@property(nonatomic) BOOL attempted;
+@property(nonatomic, copy, nullable) NSString *joinedSSID;
+@property(nonatomic, copy, nullable) void (^userDeniedHandler)(void);
+@end
+@implementation GNCHotspotConsentRun
+@end
+static GNCHotspotConsentRun *gHotspotConsentRun;
+
 // NEHotspotConfigurationManager is process-wide and has no apply cancellation API.
 // Keep its pending operation gated until the actual completion, including after
 // the synchronous caller cancels or times out.
@@ -70,6 +84,43 @@ static NSCondition *GNCHotspotJoinCondition(void) {
   return condition;
 }
 
+void GNCBeginWifiHotspotSession(NSString *identifier, void (^userDeniedHandler)(void)) {
+  NSCondition *condition = GNCHotspotJoinCondition();
+  [condition lock];
+  gHotspotConsentRun.active = NO;
+  GNCHotspotConsentRun *run = [GNCHotspotConsentRun new];
+  run.identifier = identifier;
+  run.active = YES;
+  run.userDeniedHandler = userDeniedHandler;
+  gHotspotConsentRun = run;
+  [condition broadcast];
+  [condition unlock];
+}
+
+void GNCEndWifiHotspotSession(NSString *identifier) {
+  NSCondition *condition = GNCHotspotJoinCondition();
+  [condition lock];
+  if ([gHotspotConsentRun.identifier isEqualToString:identifier]) {
+    // Retain the inactive tombstone so delayed BWU work cannot prompt between runs.
+    gHotspotConsentRun.active = NO;
+    gHotspotConsentRun.userDeniedHandler = nil;
+    [condition broadcast];
+  }
+  [condition unlock];
+}
+
+static void GNCNotifyHotspotUserDenied(GNCHotspotConsentRun *run) {
+  // Never call application code while holding the medium lock. Recheck ownership
+  // on delivery: the OS callback can outlive cancellation and an explicit retry.
+  dispatch_async(dispatch_get_main_queue(), ^{
+    NSCondition *condition = GNCHotspotJoinCondition();
+    [condition lock];
+    void (^handler)(void) = (gHotspotConsentRun == run && run.active) ? run.userDeniedHandler : nil;
+    [condition unlock];
+    if (handler) handler();
+  });
+}
+
 static void GNCFinishHotspotJoin(GNCHotspotJoinAttempt *attempt, BOOL removeConfiguration) {
   NSCondition *condition = GNCHotspotJoinCondition();
   [condition lock];
@@ -87,6 +138,10 @@ static void GNCFinishHotspotJoin(GNCHotspotJoinAttempt *attempt, BOOL removeConf
   [condition broadcast];
   [condition unlock];
 }
+#else
+// Hotspot consent prompts are an iOS behavior; keep the shared Swift API portable.
+void GNCBeginWifiHotspotSession(NSString *identifier, void (^userDeniedHandler)(void)) {}
+void GNCEndWifiHotspotSession(NSString *identifier) {}
 #endif
 
 @interface GNCHotspotMedium ()
@@ -134,18 +189,27 @@ static void GNCFinishHotspotJoin(GNCHotspotJoinAttempt *attempt, BOOL removeConf
   }
 
 #if TARGET_OS_IOS
-  NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + kConnectionTimeoutInSeconds;
-  BOOL (^shouldStop)(void) = ^BOOL{
-    return (isCancelled && isCancelled()) || NSProcessInfo.processInfo.systemUptime >= deadline;
-  };
   NSCondition *condition = GNCHotspotJoinCondition();
   [condition lock];
+  GNCHotspotConsentRun *run = gHotspotConsentRun;
+  NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + kConnectionTimeoutInSeconds;
+  BOOL (^shouldStop)(void) = ^BOOL{
+    return (isCancelled && isCancelled()) || (run && (!run.active || run.denied)) ||
+        NSProcessInfo.processInfo.systemUptime >= deadline;
+  };
   // The bandwidth-upgrade handler already retries with backoff. Do not start a
   // second OS apply, or spend a new attempt's consent budget waiting for an old one.
   if (gPendingHotspotJoin || shouldStop()) {
     [condition unlock];
     return NO;
   }
+  if (run.attempted) {
+    // BWU may retry its socket on an existing association, but never re-prompt.
+    BOOL reuse = [run.joinedSSID isEqualToString:ssid];
+    [condition unlock];
+    return reuse;
+  }
+  run.attempted = YES;
   GNCHotspotJoinAttempt *attempt = [[GNCHotspotJoinAttempt alloc] init];
   attempt.ssid = ssid;
   gPendingHotspotJoin = attempt;
@@ -155,6 +219,7 @@ static void GNCFinishHotspotJoin(GNCHotspotJoinAttempt *attempt, BOOL removeConf
                                                                      passphrase:password
                                                                           isWEP:NO];
   config.joinOnce = YES;
+  GNCLoggerInfo(@"Hotspot system join requested");
   [[NEHotspotConfigurationManager sharedManager]
       applyConfiguration:config
        completionHandler:^(NSError *_Nullable error) {
@@ -170,9 +235,14 @@ static void GNCFinishHotspotJoin(GNCHotspotJoinAttempt *attempt, BOOL removeConf
          [condition lock];
          attempt.completed = YES;
          attempt.connected = connected;
+         BOOL denied = [error.domain isEqualToString:NEHotspotConfigurationErrorDomain] &&
+             error.code == NEHotspotConfigurationErrorUserDenied;
+         BOOL notifyDenied = denied && run && run.active && !run.denied && gHotspotConsentRun == run;
+         if (notifyDenied) run.denied = YES;
          BOOL abandoned = attempt.abandoned;
          [condition broadcast];
          [condition unlock];
+         if (notifyDenied) GNCNotifyHotspotUserDenied(run);
          if (abandoned) {
            // Clean up this late result before allowing another apply. Never let
            // an old callback remove a newer operation's joinOnce configuration.
@@ -205,6 +275,9 @@ static void GNCFinishHotspotJoin(GNCHotspotJoinAttempt *attempt, BOOL removeConf
     }
   }
   if (shouldStop()) connected = NO;
+  [condition lock];
+  if (connected && run.active && gHotspotConsentRun == run) run.joinedSSID = ssid;
+  [condition unlock];
   GNCFinishHotspotJoin(attempt, !connected);
   return connected;
 #elif TARGET_OS_OSX
@@ -279,6 +352,10 @@ static void GNCFinishHotspotJoin(GNCHotspotJoinAttempt *attempt, BOOL removeConf
     GNCLoggerError(@"SSID cannot be empty.");
     return;
   }
+  NSCondition *condition = GNCHotspotJoinCondition();
+  [condition lock];
+  if ([gHotspotConsentRun.joinedSSID isEqualToString:ssid]) gHotspotConsentRun.joinedSSID = nil;
+  [condition unlock];
   [[NEHotspotConfigurationManager sharedManager] removeConfigurationForSSID:ssid];
 #elif TARGET_OS_OSX
   CWInterface *wifiInterface = [CWWiFiClient sharedWiFiClient].interface;
@@ -342,7 +419,7 @@ static void GNCFinishHotspotJoin(GNCHotspotJoinAttempt *attempt, BOOL removeConf
     [NEHotspotNetwork fetchCurrentWithCompletionHandler:^(NEHotspotNetwork *_Nullable network) {
       if (network) {
         networkSSID = network.SSID;
-        GNCLoggerDebug(@"iOS 14+ Current Wi-Fi SSID: %@", networkSSID);
+        GNCLoggerDebug(@"Current Wi-Fi association available");
       } else {
         GNCLoggerError(@"Failed to get current Wifi SSID");
       }
@@ -353,7 +430,7 @@ static void GNCFinishHotspotJoin(GNCHotspotJoinAttempt *attempt, BOOL removeConf
     for (NSString *interface in interfaces) {
       id info = CFBridgingRelease(CNCopyCurrentNetworkInfo((__bridge CFStringRef)(interface)));
       networkSSID = [info valueForKey:@"SSID"];
-      GNCLoggerDebug(@"Current Wi-Fi SSID: %@", networkSSID);
+      GNCLoggerDebug(@"Current Wi-Fi association available");
     }
     dispatch_semaphore_signal(semaphore_internal);
   }

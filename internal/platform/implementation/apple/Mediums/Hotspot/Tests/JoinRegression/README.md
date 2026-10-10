@@ -8,7 +8,7 @@ python3 internal/platform/implementation/apple/Mediums/Hotspot/Tests/JoinRegress
 ```
 
 This XCTest harness compiles the production iOS join methods, gate helpers,
-constants and SSID lookup methods verbatim from `GNCHotspotMedium.m`. It replaces
+constants, disconnect and SSID lookup methods verbatim from `GNCHotspotMedium.m`. It replaces
 only the NetworkExtension/CoreLocation API boundaries and monotonic clock.
 Generated source and SHA256 provenance are written to a temporary directory;
 `--output-dir /path` retains them at a chosen location. It does not modify SDK
@@ -81,3 +81,42 @@ ctest --test-dir /tmp/nearby-cancellation-tests --output-on-failure
   WebRTC headers. ASan could not run because its runtime hung before `main`;
   ordinary tests passed, so no sanitizer result is claimed.
 - Physical-device verification of this patch is a separate step.
+
+## One prompt per explicit run (2026-10-10)
+
+Applications may opt in with `ConnectionManager.beginWifiHotspotSession`, and
+must call `endWifiHotspotSession` before closing that run. This allows one OS
+apply per explicit run. BWU socket retries can reuse its successfully joined
+SSID without another apply. An ended run blocks delayed work between runs; a
+new explicit run gets a new allowance, while any pending old OS operation still
+owns the process-wide gate until its completion/cleanup. No credentials are
+included in the callback or logs.
+
+Only the exact NetworkExtension `userDenied` domain/code calls the handler, once
+on the main queue. It does not disconnect BLE: the application owns presentation
+and orderly transport termination. Other failures, association verification and
+timeouts are not mislabeled as refusal. Both the OS callback and queued event
+retain/check their run ownership, so an old callback cannot reject a later run.
+
+The actual-source suite now additionally tests a refusal followed by automatic
+BWU retry, one refusal event, a fresh explicit run, pending and already-queued
+stale callbacks, other error domains/codes, association verification, reuse
+without a second prompt, invalidation after disconnect, and a late refusal after the consent deadline.
+
+The historical re-prompt is reproducible against the previous pin:
+
+```sh
+python3 internal/platform/implementation/apple/Mediums/Hotspot/Tests/JoinRegression/run_tests.py \
+  --revision 0859eeaed77d8ad9a7c82d3b5c945dc53b27d0bc \
+  --test testUserDeniedPreventsAutonomousSecondApply
+```
+
+That baseline issues two applies instead of one (expected RED). The test caller
+omits the not-yet-existing explicit-run API for old revisions; production join
+source is still extracted verbatim. Full Swift/iOS application integration and
+physical refusal/retry checks remain separate from this radio-free harness.
+
+Current validation: 20 actual-source XCTest cases (including the 20-second
+consent hold), Objective-C iOS/macOS syntax compilation, and all 13 production
+NearbyConnections Swift sources typechecked against the updated Objective-C
+public headers. Full application linking/hardware checks are still separate.

@@ -29,6 +29,7 @@
 #define NEHotspotConfigurationManager SvrkaFakeHotspotConfigurationManager
 static NSString *const NEHotspotConfigurationErrorDomain = @"NEHotspotConfigurationErrorDomain";
 static const NSInteger NEHotspotConfigurationErrorAlreadyAssociated = 13;
+static const NSInteger NEHotspotConfigurationErrorUserDenied = 7;
 
 @interface SvrkaTestClock : NSObject
 @property(atomic) NSTimeInterval offset;
@@ -190,6 +191,7 @@ static void (^heldFetch)(NEHotspotNetwork *);
 - (BOOL)connectToWifiNetworkWithSSID:(NSString *)ssid password:(NSString *)password;
 - (BOOL)connectToWifiNetworkWithSSID:(NSString *)ssid password:(NSString *)password isCancelled:(BOOL (^)(void))cancel;
 - (NSString *)getCurrentWifiSSID;
+- (void)disconnectToWifiNetworkWithSSID:(NSString *)ssid;
 - (NSString *)getCurrentWifiSSIDWithCancellation:(BOOL (^)(void))cancel;
 @end
 #define NSProcessInfo SvrkaTestClock
@@ -228,6 +230,8 @@ static void (^heldFetch)(NEHotspotNetwork *);
 @end
 
 @interface HotspotJoinTests : XCTestCase
+@property(nonatomic) NSUInteger deniedEvents;
+@property(nonatomic, copy) NSString *runID;
 @end
 @implementation HotspotJoinTests
 - (void)setUp {
@@ -235,6 +239,29 @@ static void (^heldFetch)(NEHotspotNetwork *);
   [[NEHotspotConfigurationManager sharedManager] reset];
   [SvrkaTestClock processInfo].offset = 0;
   [NEHotspotNetwork reset];
+#if GNC_HOTSPOT_CONSENT_SESSION
+  // Tests without beginRun also retain the unmodified legacy SDK contract.
+  [GNCHotspotJoinCondition() lock];
+  gHotspotConsentRun = nil;
+  [GNCHotspotJoinCondition() unlock];
+#endif
+}
+- (void)beginRun {
+  self.runID = NSUUID.UUID.UUIDString;
+#if GNC_HOTSPOT_CONSENT_SESSION
+  __weak typeof(self) weakSelf = self;
+  GNCBeginWifiHotspotSession(self.runID, ^{ weakSelf.deniedEvents++; });
+#endif
+}
+- (void)endRun {
+#if GNC_HOTSPOT_CONSENT_SESSION
+  GNCEndWifiHotspotSession(self.runID);
+#endif
+}
+- (void)drainEvents {
+  XCTestExpectation *tick = [self expectationWithDescription:@"main queue callbacks"];
+  dispatch_async(dispatch_get_main_queue(), ^{ [tick fulfill]; });
+  [self waitForExpectationsWithTimeout:1 handler:nil];
 }
 - (void)testConsentCanTakeLongerThan18Seconds {
   NEHotspotConfigurationManager *os = [NEHotspotConfigurationManager sharedManager];
@@ -386,4 +413,167 @@ static void (^heldFetch)(NEHotspotNetwork *);
   XCTAssertEqual(dispatch_semaphore_wait(returned, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)), 0L);
   XCTAssertTrue(success);
 }
+- (void)testUserDeniedPreventsAutonomousSecondApply {
+  [self beginRun];
+  NEHotspotConfigurationManager *os = [NEHotspotConfigurationManager sharedManager];
+  GNCHotspotMedium *medium = [GNCHotspotMedium new];
+  JoinCall *first = [[JoinCall alloc] initWithMedium:medium ssid:@"first" cancelled:NO];
+  XCTAssertTrue([os waitForApplyCount:1 timeout:2]);
+  [os completeAtIndex:0 error:[NSError errorWithDomain:NEHotspotConfigurationErrorDomain code:7 userInfo:nil]];
+  XCTAssertTrue([first wait:2]);
+  JoinCall *retry = [[JoinCall alloc] initWithMedium:medium ssid:@"first" cancelled:NO];
+  BOOL returned = [retry wait:0.5];
+  NSUInteger applies = os.applyCount;
+  if (applies > 1) [os completeAtIndex:1 error:nil];
+  if (!returned) XCTAssertTrue([retry wait:2]);
+  XCTAssertTrue(returned);
+  XCTAssertEqual(applies, 1u);
+  XCTAssertFalse(retry.result);
+  [self drainEvents];
+  XCTAssertEqual(self.deniedEvents, 1u);
+}
+
+- (void)testExplicitNewRunAllowsFreshApplyAfterDenial {
+  [self beginRun];
+  NEHotspotConfigurationManager *os = [NEHotspotConfigurationManager sharedManager];
+  JoinCall *first = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"first" cancelled:NO];
+  XCTAssertTrue([os waitForApplyCount:1 timeout:2]);
+  [os completeAtIndex:0 error:[NSError errorWithDomain:NEHotspotConfigurationErrorDomain code:7 userInfo:nil]];
+  XCTAssertTrue([first wait:2]);
+  [self drainEvents];
+  XCTAssertEqual(self.deniedEvents, 1u);
+  [self endRun];
+  [self beginRun];
+  JoinCall *retry = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"second" cancelled:NO];
+  XCTAssertTrue([os waitForApplyCount:2 timeout:2]);
+  [os completeAtIndex:1 error:nil];
+  XCTAssertTrue([retry wait:2]);
+  XCTAssertTrue(retry.result);
+  [self drainEvents];
+  XCTAssertEqual(self.deniedEvents, 1u);
+}
+- (void)testLateDeniedCallbackCannotDenyNewRun {
+  [self beginRun];
+  NEHotspotConfigurationManager *os = [NEHotspotConfigurationManager sharedManager];
+  JoinCall *old = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"first" cancelled:NO];
+  XCTAssertTrue([os waitForApplyCount:1 timeout:2]);
+  [self endRun];
+  old.cancelled = YES;
+  XCTAssertTrue([old wait:0.5]);
+  [self beginRun];
+  JoinCall *blocked = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"second" cancelled:NO];
+  XCTAssertTrue([blocked wait:0.5]);
+  XCTAssertEqual(os.applyCount, 1u);
+  [os completeAtIndex:0 error:[NSError errorWithDomain:NEHotspotConfigurationErrorDomain code:7 userInfo:nil]];
+  [self drainEvents];
+  XCTAssertEqual(self.deniedEvents, 0u);
+  JoinCall *fresh = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"second" cancelled:NO];
+  XCTAssertTrue([os waitForApplyCount:2 timeout:2]);
+  [os completeAtIndex:1 error:nil];
+  XCTAssertTrue([fresh wait:2]);
+  XCTAssertTrue(fresh.result);
+  XCTAssertEqualObjects(os.events, (@[@"apply:first", @"remove:first", @"apply:second"]));
+}
+- (void)testQueuedDenialDeliveryCannotReachNewRun {
+  [self beginRun];
+  NEHotspotConfigurationManager *os = [NEHotspotConfigurationManager sharedManager];
+  JoinCall *call = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"first" cancelled:NO];
+  XCTAssertTrue([os waitForApplyCount:1 timeout:2]);
+  [os completeAtIndex:0 error:[NSError errorWithDomain:NEHotspotConfigurationErrorDomain code:7 userInfo:nil]];
+  XCTAssertTrue([call wait:2]);
+  [self endRun];
+  [self beginRun];
+  [self drainEvents];
+  XCTAssertEqual(self.deniedEvents, 0u);
+}
+- (void)testOtherErrorDoesNotReportDenialOrReprompt {
+  for (NSError *error in @[
+      [NSError errorWithDomain:NEHotspotConfigurationErrorDomain code:8 userInfo:nil],
+      [NSError errorWithDomain:@"OtherDomain" code:7 userInfo:nil]]) {
+    [self beginRun];
+    NEHotspotConfigurationManager *os = [NEHotspotConfigurationManager sharedManager];
+    NSUInteger before = os.applyCount;
+    JoinCall *first = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"first" cancelled:NO];
+    XCTAssertTrue([os waitForApplyCount:before + 1 timeout:2]);
+    [os completeAtIndex:before error:error];
+    XCTAssertTrue([first wait:2]);
+    JoinCall *retry = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"first" cancelled:NO];
+    XCTAssertTrue([retry wait:0.5]);
+    XCTAssertFalse(retry.result);
+    XCTAssertEqual(os.applyCount, before + 1);
+    [self drainEvents];
+    XCTAssertEqual(self.deniedEvents, 0u);
+    [self endRun];
+  }
+}
+- (void)testSuccessfulAssociationCanBeReusedWithoutAnotherPrompt {
+  [self beginRun];
+  NEHotspotConfigurationManager *os = [NEHotspotConfigurationManager sharedManager];
+  GNCHotspotMedium *medium = [GNCHotspotMedium new];
+  JoinCall *first = [[JoinCall alloc] initWithMedium:medium ssid:@"first" cancelled:NO];
+  XCTAssertTrue([os waitForApplyCount:1 timeout:2]);
+  [os completeAtIndex:0 error:nil];
+  XCTAssertTrue([first wait:2]);
+  JoinCall *reuse = [[JoinCall alloc] initWithMedium:medium ssid:@"first" cancelled:NO];
+  XCTAssertTrue([reuse wait:0.5]);
+  XCTAssertTrue(reuse.result);
+  JoinCall *different = [[JoinCall alloc] initWithMedium:medium ssid:@"second" cancelled:NO];
+  XCTAssertTrue([different wait:0.5]);
+  XCTAssertFalse(different.result);
+  XCTAssertEqual(os.applyCount, 1u);
+  [self endRun];
+  JoinCall *ended = [[JoinCall alloc] initWithMedium:medium ssid:@"first" cancelled:NO];
+  XCTAssertTrue([ended wait:0.5]);
+  XCTAssertFalse(ended.result);
+  XCTAssertEqual(os.applyCount, 1u);
+}
+- (void)testTimedOutApplyLateDenialStopsSameRunOnlyOnce {
+  [self beginRun];
+  NEHotspotConfigurationManager *os = [NEHotspotConfigurationManager sharedManager];
+  JoinCall *call = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"first" cancelled:NO];
+  XCTAssertTrue([os waitForApplyCount:1 timeout:2]);
+  [SvrkaTestClock processInfo].offset = 91;
+  XCTAssertTrue([call wait:0.5]);
+  [os completeAtIndex:0 error:[NSError errorWithDomain:NEHotspotConfigurationErrorDomain code:7 userInfo:nil]];
+  [self drainEvents];
+  XCTAssertEqual(self.deniedEvents, 1u);
+  JoinCall *retry = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"first" cancelled:NO];
+  XCTAssertTrue([retry wait:0.5]);
+  XCTAssertFalse(retry.result);
+  XCTAssertEqual(os.applyCount, 1u);
+}
+
+- (void)testAssociationVerificationFailureIsNotUserDenial {
+  [self beginRun];
+  NEHotspotConfigurationManager *os = [NEHotspotConfigurationManager sharedManager];
+  [NEHotspotNetwork setCurrentSSID:@"other"];
+  JoinCall *first = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"first" cancelled:NO];
+  XCTAssertTrue([os waitForApplyCount:1 timeout:2]);
+  [os completeAtIndex:0 error:nil];
+  XCTAssertTrue([first wait:2]);
+  XCTAssertFalse(first.result);
+  JoinCall *retry = [[JoinCall alloc] initWithMedium:[GNCHotspotMedium new] ssid:@"first" cancelled:NO];
+  XCTAssertTrue([retry wait:0.5]);
+  XCTAssertFalse(retry.result);
+  XCTAssertEqual(os.applyCount, 1u);
+  [self drainEvents];
+  XCTAssertEqual(self.deniedEvents, 0u);
+}
+
+- (void)testDisconnectedAssociationCannotBeReusedOrReprompt {
+  [self beginRun];
+  NEHotspotConfigurationManager *os = [NEHotspotConfigurationManager sharedManager];
+  GNCHotspotMedium *medium = [GNCHotspotMedium new];
+  JoinCall *first = [[JoinCall alloc] initWithMedium:medium ssid:@"first" cancelled:NO];
+  XCTAssertTrue([os waitForApplyCount:1 timeout:2]);
+  [os completeAtIndex:0 error:nil];
+  XCTAssertTrue([first wait:2]);
+  [medium disconnectToWifiNetworkWithSSID:@"first"];
+  JoinCall *retry = [[JoinCall alloc] initWithMedium:medium ssid:@"first" cancelled:NO];
+  XCTAssertTrue([retry wait:0.5]);
+  XCTAssertFalse(retry.result);
+  XCTAssertEqual(os.applyCount, 1u);
+  XCTAssertEqual(os.removeCount, 1u);
+}
+
 @end

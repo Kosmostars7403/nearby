@@ -14,6 +14,15 @@
 
 #import <Foundation/Foundation.h>
 
+
+/** Begins one explicit iOS hotspot-consent run. Call end before releasing its owner.
+ * At most one apply is issued per run; userDeniedHandler runs on the main queue.
+ * No effect on macOS. Identifiers must be unique for every explicit new run.
+ */
+FOUNDATION_EXPORT void GNCBeginWifiHotspotSession(NSString *_Nonnull identifier,
+                                                void (^_Nonnull userDeniedHandler)(void));
+FOUNDATION_EXPORT void GNCEndWifiHotspotSession(NSString *_Nonnull identifier);
+
 @class GNCAdvertisingOptions;
 @class GNCConnectionOptions;
 @class GNCDiscoveryOptions;
