@@ -169,6 +169,12 @@ static NSTimeInterval gKBTCrashLoopMaxTimeBetweenResetting = 15.f;
 }
 
 - (void)addBleServiceForServiceManager:(GNSPeripheralServiceManager *)peripheralServiceManager {
+  // CoreBluetooth drops addService while its initial state is still unknown.
+  // Keep the service pending until peripheralManagerDidUpdateState retries it.
+  if (_cbPeripheralManager.state != CBManagerStatePoweredOn &&
+      _cbPeripheralManager.state != CBManagerStatePoweredOff) {
+    return;
+  }
   if (peripheralServiceManager.cbServiceState != GNSBluetoothServiceStateNotAdded) {
     // Ignored if the peripheralServiceManager.cbService was already added.
     return;

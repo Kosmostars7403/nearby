@@ -34,6 +34,10 @@
 
 - (void)addService:(CBMutableService *)service {
   _addServiceCount++;
+  // CoreBluetooth rejects registration before readiness without a callback.
+  if (_state != CBManagerStatePoweredOn && _state != CBManagerStatePoweredOff) {
+    return;
+  }
   [_services addObject:service];
   dispatch_async(dispatch_get_main_queue(), ^{
     id<CBPeripheralManagerDelegate> delegate = self.delegate;

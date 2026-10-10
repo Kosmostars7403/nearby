@@ -242,6 +242,41 @@
                                 expectedAdvertisementData:nil];
 }
 
+- (void)testServiceRegistrationWaitsForInitialBluetoothState {
+  [_peripheralManager start];
+  _peripheralManager.fakeCBPeripheralManager.state = CBManagerStateUnknown;
+  GNSPeripheralServiceManager *serviceManager = [[GNSPeripheralServiceManager alloc]
+         initWithBleServiceUUID:[CBUUID UUIDWithString:@"FEF3"]
+       addPairingCharacteristic:NO
+      shouldAcceptSocketHandler:^BOOL(GNSSocket *socket) { return NO; }];
+  XCTestExpectation *registered =
+      [[XCTestExpectation alloc] initWithDescription:@"service registered"];
+  __block NSUInteger completions = 0;
+  [_peripheralManager addPeripheralServiceManager:serviceManager
+                        bleServiceAddedCompletion:^(NSError *error) {
+                          XCTAssertNil(error);
+                          completions++;
+                          [registered fulfill];
+                        }];
+  XCTestExpectation *queued =
+      [[XCTestExpectation alloc] initWithDescription:@"registration queued"];
+  dispatch_async(dispatch_get_main_queue(), ^{ [queued fulfill]; });
+  XCTAssertEqual([XCTWaiter waitForExpectations:@[queued] timeout:1], XCTWaiterResultCompleted);
+  XCTAssertEqual(_peripheralManager.fakeCBPeripheralManager.addServiceCount, 0);
+  XCTAssertEqual(completions, 0u);
+
+  _peripheralManager.fakeCBPeripheralManager.state = CBManagerStatePoweredOn;
+  [_peripheralManager peripheralManagerDidUpdateState:(CBPeripheralManager *)_peripheralManager
+                                                          .fakeCBPeripheralManager];
+  XCTAssertEqual([XCTWaiter waitForExpectations:@[registered] timeout:1], XCTWaiterResultCompleted);
+  XCTAssertEqual(_peripheralManager.fakeCBPeripheralManager.addServiceCount, 1);
+  XCTAssertEqual(completions, 1u);
+  [_peripheralManager peripheralManagerDidUpdateState:(CBPeripheralManager *)_peripheralManager
+                                                          .fakeCBPeripheralManager];
+  XCTAssertEqual(_peripheralManager.fakeCBPeripheralManager.addServiceCount, 1);
+  XCTAssertEqual(completions, 1u);
+}
+
 - (void)testStartWithBleStateResettingAndTurnOnBluetooth {
   [_peripheralManager start];
   [self updatePeripheralManagerWithPeripheralManagerState:CBPeripheralManagerStateResetting];
