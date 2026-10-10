@@ -107,7 +107,8 @@ static const UInt8 kConnectionToHostTimeoutInSeconds = 10;
                GNCLoggerInfo(@"Already connected to %@", ssid);
                connected = YES;
              } else {
-               GNCLoggerError(@"Failed to connect: %@ (%@)", ssid, error.localizedDescription);
+               GNCLoggerError(@"Hotspot connection failed: domain=%@ code=%ld", error.domain,
+                              (long)error.code);
              }
            } else {
              GNCLoggerInfo(@"Successfully connected to %@", ssid);
@@ -119,7 +120,7 @@ static const UInt8 kConnectionToHostTimeoutInSeconds = 10;
       // Timeout to connect to the hotspot. Technically, we should not reach here because the
       // completion handler will be called even if it times out. But adding this log for debugging
       // purpose.
-      GNCLoggerError(@"Connecting to %@ timeout in %d seconds", ssid, kConnectionTimeoutInSeconds);
+      GNCLoggerError(@"Hotspot connection timed out after %d seconds", kConnectionTimeoutInSeconds);
       break;
     }
 
