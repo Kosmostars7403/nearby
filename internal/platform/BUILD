@@ -459,6 +459,16 @@ cc_test(
 )
 
 cc_test(
+    name = "cancellation_scope_test",
+    srcs = ["cancellation_scope_test.cc"],
+    deps = [
+        ":base",
+        ":cancellation_flag",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "expected_test",
     srcs = ["expected_test.cc"],
     deps = [

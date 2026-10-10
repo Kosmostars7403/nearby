@@ -131,13 +131,28 @@ WifiHotspotMedium::WifiHotspotMedium(GNCHotspotMedium* hotspot_medium) : medium_
 WifiHotspotMedium::~WifiHotspotMedium() { DisconnectWifiHotspot(); }
 
 bool WifiHotspotMedium::ConnectWifiHotspot(const HotspotCredentials& hotspot_credentials_) {
+  return ConnectWifiHotspotWithCancellation(hotspot_credentials_, nullptr);
+}
+
+bool WifiHotspotMedium::ConnectWifiHotspotWithCancellation(
+    const HotspotCredentials& hotspot_credentials_, CancellationFlag* cancellation_flag) {
+  if (cancellation_flag != nullptr && cancellation_flag->Cancelled()) {
+    return false;
+  }
   NSString* ssid = [[NSString alloc] initWithUTF8String:hotspot_credentials_.GetSSID().c_str()];
   std::string hotspot_password = hotspot_credentials_.GetPassword();
   NSString* password = [[NSString alloc] initWithUTF8String:hotspot_password.c_str()];
 
   GNCLoggerInfo(@"ConnectWifiHotspot SSID: %@ Password: %s", ssid,
                 masker::Mask(hotspot_password).c_str());
-  bool result = [medium_ connectToWifiNetworkWithSSID:ssid password:password];
+  // The medium polls this block only during this synchronous call. Its late
+  // system completion handler must not retain the caller-owned flag.
+  bool result = [medium_ connectToWifiNetworkWithSSID:ssid
+                                           password:password
+                                        isCancelled:^BOOL {
+                                          return cancellation_flag != nullptr &&
+                                                 cancellation_flag->Cancelled();
+                                        }];
   if (result) {
     GNCLoggerInfo(@"Successfully connected to %@", ssid);
     hotspot_ssid_ = ssid;

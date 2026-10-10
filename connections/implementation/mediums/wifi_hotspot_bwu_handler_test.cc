@@ -31,6 +31,7 @@
 #include "internal/platform/count_down_latch.h"
 #include "internal/platform/exception.h"
 #include "internal/platform/expected.h"
+#include "internal/platform/feature_flags.h"
 #include "internal/platform/flags/nearby_platform_feature_flags.h"
 #include "internal/platform/logging.h"
 #include "internal/platform/medium_environment.h"
@@ -206,6 +207,31 @@ TEST_F(WifiHotspotTest, CreateUpgradedEndpointChannel_RejectGatewayPort0) {
   EXPECT_TRUE(result.has_error());
   EXPECT_EQ(result.error().operation_result_code().value(),
             OperationResultCode::CONNECTIVITY_WIFI_HOTSPOT_INVALID_CREDENTIAL);
+}
+
+TEST_F(WifiHotspotTest, CancelledNetworkJoinReportsCancellation) {
+  env_.SetFeatureFlags(FeatureFlags::Flags{.enable_cancellation_flag = true});
+  ClientProxy client;
+  client.AddCancellationFlag(std::string(kEndpointID));
+  client.CancelEndpoint(std::string(kEndpointID));
+  Mediums mediums;
+  WifiHotspotBwuHandler handler(&mediums.GetWifiHotspot(), nullptr);
+
+  UpgradePathInfo path_info;
+  auto* credentials = path_info.mutable_wifi_hotspot_credentials();
+  credentials->set_ssid("CancelledHotspot");
+  credentials->set_password("password");
+  credentials->set_gateway("192.168.43.1");
+  credentials->set_port(1234);
+
+  auto result = handler.CreateUpgradedEndpointChannel(
+      &client, std::string(kServiceID), std::string(kEndpointID), path_info);
+  ASSERT_TRUE(result.has_error());
+  EXPECT_EQ(
+      result.error().operation_result_code(),
+      OperationResultCode::
+          CLIENT_CANCELLATION_CANCEL_WIFI_HOTSPOT_OUTGOING_CONNECTION);
+  EXPECT_FALSE(mediums.GetWifiHotspot().IsConnectedToHotspot());
 }
 
 }  // namespace connections

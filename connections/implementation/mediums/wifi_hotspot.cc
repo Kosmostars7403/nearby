@@ -112,13 +112,23 @@ bool WifiHotspot::IsConnectedToHotspot() {
 
 bool WifiHotspot::ConnectWifiHotspot(
     const HotspotCredentials& hotspot_credentials) {
+  return ConnectWifiHotspotWithCancellation(hotspot_credentials, nullptr);
+}
+
+bool WifiHotspot::ConnectWifiHotspotWithCancellation(
+    const HotspotCredentials& hotspot_credentials,
+    CancellationFlag* cancellation_flag) {
   MutexLock lock(&mutex_);
+  if (cancellation_flag != nullptr && cancellation_flag->Cancelled()) {
+    return false;
+  }
   if (is_connected_to_hotspot_) {
     LOG(INFO)
         << "No need to connect to Hotspot because it is already connected.";
     return true;
   }
-  is_connected_to_hotspot_ = medium_.ConnectWifiHotspot(hotspot_credentials);
+  is_connected_to_hotspot_ = medium_.ConnectWifiHotspotWithCancellation(
+      hotspot_credentials, cancellation_flag);
   return is_connected_to_hotspot_;
 }
 

@@ -104,6 +104,9 @@ class WifiHotspotMedium : public api::WifiHotspotMedium {
    * @param hotspot_credentials_ The credentials of the Wifi Hotspot to connect to.
    */
   bool ConnectWifiHotspot(const HotspotCredentials& hotspot_credentials_) override;
+  bool ConnectWifiHotspotWithCancellation(
+      const HotspotCredentials& hotspot_credentials,
+      CancellationFlag* cancellation_flag) override;
 
   /**
    * @brief Disconnects from the currently connected Wifi Hotspot.

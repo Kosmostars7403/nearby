@@ -58,6 +58,17 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)connectToWifiNetworkWithSSID:(NSString *)ssid password:(NSString *)password;
 
 /**
+ * Connects while allowing the caller to cancel its wait. On iOS the consent/join
+ * budget is 90 seconds. If a prior OS apply is still pending, returns NO without
+ * issuing another apply; the bandwidth-upgrade handler can retry with backoff.
+ * The cancellation block is polled synchronously and is not retained by the OS
+ * completion handler.
+ */
+- (BOOL)connectToWifiNetworkWithSSID:(NSString *)ssid
+                          password:(NSString *)password
+                       isCancelled:(BOOL (^_Nullable)(void))isCancelled;
+
+/**
  * Disconnects from a Wifi Hotspot with the specified SSID.
  *
  * @param ssid The SSID of the Hotspot to disconnect from.

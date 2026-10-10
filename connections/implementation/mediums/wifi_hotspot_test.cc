@@ -132,6 +132,32 @@ TEST_P(WifiHotspotTest, CanStartHotspotThatOtherConnect) {
   EXPECT_TRUE(wifi_hotspot_a->StopWifiHotspot());
 }
 
+TEST_P(WifiHotspotTest, CancelledNetworkJoinDoesNotLeaveConnectedState) {
+  FeatureFlags feature_flags = GetParam();
+  env_.SetFeatureFlags(feature_flags);
+  WifiHotspot access_point;
+  WifiHotspot client;
+  ASSERT_TRUE(access_point.StartWifiHotspot());
+  const HotspotCredentials credentials =
+      *access_point.GetCredentials(std::string(kServiceID));
+
+  CancellationFlag cancelled(true);
+  EXPECT_EQ(client.ConnectWifiHotspotWithCancellation(credentials, &cancelled),
+            !feature_flags.enable_cancellation_flag);
+  EXPECT_EQ(client.IsConnectedToHotspot(),
+            !feature_flags.enable_cancellation_flag);
+  EXPECT_TRUE(client.DisconnectWifiHotspot());
+
+  CancellationFlag retry;
+  EXPECT_TRUE(client.ConnectWifiHotspotWithCancellation(credentials, &retry));
+  EXPECT_TRUE(client.IsConnectedToHotspot());
+  // Cancellation still wins if a previous operation has joined the network.
+  EXPECT_EQ(client.ConnectWifiHotspotWithCancellation(credentials, &cancelled),
+            !feature_flags.enable_cancellation_flag);
+  EXPECT_TRUE(client.DisconnectWifiHotspot());
+  EXPECT_TRUE(access_point.StopWifiHotspot());
+}
+
 TEST_P(WifiHotspotTest, CanStartHotspotThatOtherCanCancelConnect) {
   FeatureFlags feature_flags = GetParam();
   env_.SetFeatureFlags(feature_flags);

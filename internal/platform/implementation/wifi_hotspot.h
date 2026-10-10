@@ -109,6 +109,18 @@ class WifiHotspotMedium {
   // Client device connect to a softAP with specified credential.
   virtual bool ConnectWifiHotspot(
       const HotspotCredentials& hotspot_credentials) = 0;
+
+  // The flag must remain valid until this synchronous call returns. Platforms
+  // with a cancellable network join should override this method; the default
+  // preserves compatibility with existing implementations.
+  virtual bool ConnectWifiHotspotWithCancellation(
+      const HotspotCredentials& hotspot_credentials,
+      CancellationFlag* cancellation_flag) {
+    if (cancellation_flag != nullptr && cancellation_flag->Cancelled()) {
+      return false;
+    }
+    return ConnectWifiHotspot(hotspot_credentials);
+  }
   virtual bool DisconnectWifiHotspot() = 0;
 
   // Returns the port range as a pair of min and max port.

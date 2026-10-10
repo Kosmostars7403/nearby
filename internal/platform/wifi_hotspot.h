@@ -177,9 +177,19 @@ class WifiHotspotMedium {
   bool StopWifiHotspot() { return impl_->StopWifiHotspot(); }
 
   bool ConnectWifiHotspot(const HotspotCredentials& hotspot_credentials) {
+    return ConnectWifiHotspotWithCancellation(hotspot_credentials, nullptr);
+  }
+
+  bool ConnectWifiHotspotWithCancellation(
+      const HotspotCredentials& hotspot_credentials,
+      CancellationFlag* cancellation_flag) {
     MutexLock lock(&mutex_);
+    if (cancellation_flag != nullptr && cancellation_flag->Cancelled()) {
+      return false;
+    }
     hotspot_credentials_ = hotspot_credentials;
-    return impl_->ConnectWifiHotspot(hotspot_credentials);
+    return impl_->ConnectWifiHotspotWithCancellation(hotspot_credentials,
+                                                    cancellation_flag);
   }
 
   bool DisconnectWifiHotspot() { return impl_->DisconnectWifiHotspot(); }

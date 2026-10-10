@@ -217,14 +217,20 @@ WifiHotspotBwuHandler::CreateUpgradedEndpointChannel(
             << ",  Password:" << masker::Mask(hotspot_credentials.GetPassword())
             << ",  Frequency:" << hotspot_credentials.GetFrequency();
 
-  if (!wifi_hotspot_medium_.ConnectWifiHotspot(hotspot_credentials)) {
+  std::shared_ptr<CancellationFlag> cancellation_flag =
+      client->GetCancellationFlag(endpoint_id)->CreateScopedFlag();
+  if (!wifi_hotspot_medium_.ConnectWifiHotspotWithCancellation(
+          hotspot_credentials, cancellation_flag.get())) {
+    if (cancellation_flag->Cancelled()) {
+      return {Error(
+          OperationResultCode::
+              CLIENT_CANCELLATION_CANCEL_WIFI_HOTSPOT_OUTGOING_CONNECTION)};
+    }
     LOG(ERROR) << "Connect to Hotspot failed";
     return {Error(OperationResultCode::
                       CONNECTIVITY_WIFI_HOTSPOT_LEGACY_STA_CONNECTION_FAILURE)};
   }
 
-  std::shared_ptr<CancellationFlag> cancellation_flag =
-      client->GetCancellationFlag(endpoint_id);
   ErrorOr<WifiHotspotSocket> socket_result = wifi_hotspot_medium_.Connect(
       service_id, hotspot_credentials.GetAddressCandidates(),
       cancellation_flag.get());

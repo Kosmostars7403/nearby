@@ -14,6 +14,7 @@
 
 #include "internal/platform/cancellation_flag.h"
 #include <memory>
+#include <utility>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/synchronization/mutex.h"
@@ -42,6 +43,7 @@ void CancellationFlag::Cancel() {
   }
 
   absl::flat_hash_set<CancelListener *> listeners;
+  std::vector<std::shared_ptr<CancellationFlag>> scoped_flags;
   {
     absl::MutexLock lock(*mutex_);
     if (cancelled_) {
@@ -51,11 +53,37 @@ void CancellationFlag::Cancel() {
     cancelled_ = true;
 
     listeners = listeners_;
+    for (const auto& weak_flag : scoped_flags_) {
+      if (auto scoped_flag = weak_flag.lock()) {
+        scoped_flags.push_back(std::move(scoped_flag));
+      }
+    }
+    scoped_flags_.clear();
   }
 
+  // Keep the scoped flags alive through notification without holding our mutex.
+  for (const auto& scoped_flag : scoped_flags) {
+    scoped_flag->Cancel();
+  }
   for (auto *listener : listeners) {
     (*listener)();
   }
+}
+
+std::shared_ptr<CancellationFlag> CancellationFlag::CreateScopedFlag() {
+  absl::MutexLock lock(*mutex_);
+  auto scoped_flag = std::make_shared<CancellationFlag>(cancelled_);
+  if (!cancelled_) {
+    for (auto it = scoped_flags_.begin(); it != scoped_flags_.end();) {
+      if (it->expired()) {
+        it = scoped_flags_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    scoped_flags_.push_back(scoped_flag);
+  }
+  return scoped_flag;
 }
 
 void CancellationFlag::Uncancel() {

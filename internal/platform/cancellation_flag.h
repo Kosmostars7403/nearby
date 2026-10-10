@@ -16,6 +16,7 @@
 #define PLATFORM_BASE_CANCELLATION_FLAG_H_
 
 #include <memory>
+#include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_set.h"
@@ -51,6 +52,12 @@ class CancellationFlag {
   // already cancelled (check via `Cancelled()`).
   void Uncancel() ABSL_LOCKS_EXCLUDED(mutex_);
 
+  // Creates an operation-scoped flag. Cancelling this flag also cancels the
+  // scoped flag, but resetting this flag does not reset an existing operation.
+  // The scoped flag may outlive this flag and does not keep it alive.
+  std::shared_ptr<CancellationFlag> CreateScopedFlag()
+      ABSL_LOCKS_EXCLUDED(mutex_);
+
   // Returns true if the flag has been set to cancelled.
   bool Cancelled() const ABSL_LOCKS_EXCLUDED(mutex_);
 
@@ -82,6 +89,8 @@ class CancellationFlag {
   std::unique_ptr<absl::Mutex> mutex_;
   bool cancelled_ ABSL_GUARDED_BY(mutex_) = false;
   absl::flat_hash_set<CancelListener *> ABSL_GUARDED_BY(mutex_) listeners_;
+  std::vector<std::weak_ptr<CancellationFlag>> scoped_flags_
+      ABSL_GUARDED_BY(mutex_);
 };
 
 }  // namespace nearby

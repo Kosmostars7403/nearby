@@ -187,6 +187,25 @@ TEST_P(WifiHotspotMediumTest, CanStartHotspotThatOtherConnect) {
   wifi_hotspot_b.reset();
 }
 
+TEST_P(WifiHotspotMediumTest, CancelledNetworkJoinCanBeRetried) {
+  FeatureFlags feature_flags = GetParam();
+  env_.SetFeatureFlags(feature_flags);
+  WifiHotspotMedium access_point;
+  WifiHotspotMedium client;
+  ASSERT_TRUE(access_point.StartWifiHotspot());
+  const HotspotCredentials credentials = *access_point.GetCredential();
+
+  CancellationFlag cancelled(true);
+  EXPECT_EQ(client.ConnectWifiHotspotWithCancellation(credentials, &cancelled),
+            !feature_flags.enable_cancellation_flag);
+  EXPECT_TRUE(client.DisconnectWifiHotspot());
+
+  CancellationFlag retry;
+  EXPECT_TRUE(client.ConnectWifiHotspotWithCancellation(credentials, &retry));
+  EXPECT_TRUE(client.DisconnectWifiHotspot());
+  EXPECT_TRUE(access_point.StopWifiHotspot());
+}
+
 TEST_P(WifiHotspotMediumTest, CanStartHotspotThatOtherCanCancelConnect) {
   FeatureFlags feature_flags = GetParam();
   env_.SetFeatureFlags(feature_flags);

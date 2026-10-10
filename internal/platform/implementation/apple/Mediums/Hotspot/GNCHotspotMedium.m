@@ -34,11 +34,8 @@
 NS_ASSUME_NONNULL_BEGIN
 
 #if TARGET_OS_IOS
-// The maximum number of retries for connecting to the Hotspot.
-static const UInt8 kMaxRetryCount = 3;
-// Timeout after 18s for connection attempt. From the stability test, connection take between 8-14s
-// on iOS
-static const UInt8 kConnectionTimeoutInSeconds = 18;
+// Include time for the user to approve the system prompt as well as joining Wi-Fi.
+static const UInt8 kConnectionTimeoutInSeconds = 90;
 #elif TARGET_OS_OSX
 // The maximum number of retries for connecting to the hotspot on MacOS.
 static const UInt8 kMaxRetryCount = 3;
@@ -50,8 +47,51 @@ static const UInt8 kConnectionTimeoutInSeconds = 2;
 // An arbitrary timeout that should be pretty lenient.
 static const UInt8 kConnectionToHostTimeoutInSeconds = 10;
 
+#if TARGET_OS_IOS
+// NEHotspotConfigurationManager is process-wide and has no apply cancellation API.
+// Keep its pending operation gated until the actual completion, including after
+// the synchronous caller cancels or times out.
+@interface GNCHotspotJoinAttempt : NSObject
+@property(nonatomic, copy) NSString *ssid;
+@property(nonatomic) BOOL completed;
+@property(nonatomic) BOOL connected;
+@property(nonatomic) BOOL abandoned;
+@property(nonatomic) BOOL finishing;
+@end
+@implementation GNCHotspotJoinAttempt
+@end
+
+static GNCHotspotJoinAttempt *gPendingHotspotJoin;
+
+static NSCondition *GNCHotspotJoinCondition(void) {
+  static NSCondition *condition;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ condition = [[NSCondition alloc] init]; });
+  return condition;
+}
+
+static void GNCFinishHotspotJoin(GNCHotspotJoinAttempt *attempt, BOOL removeConfiguration) {
+  NSCondition *condition = GNCHotspotJoinCondition();
+  [condition lock];
+  if (gPendingHotspotJoin != attempt || attempt.finishing) {
+    [condition unlock];
+    return;
+  }
+  attempt.finishing = YES;
+  [condition unlock];
+  if (removeConfiguration) {
+    [[NEHotspotConfigurationManager sharedManager] removeConfigurationForSSID:attempt.ssid];
+  }
+  [condition lock];
+  gPendingHotspotJoin = nil;
+  [condition broadcast];
+  [condition unlock];
+}
+#endif
+
 @interface GNCHotspotMedium ()
 @property(nonatomic) CLLocationManager *locationManager;
+- (NSString *)getCurrentWifiSSIDWithCancellation:(BOOL (^_Nullable)(void))isCancelled;
 @end
 
 @implementation GNCHotspotMedium {
@@ -78,6 +118,12 @@ static const UInt8 kConnectionToHostTimeoutInSeconds = 10;
 }
 
 - (BOOL)connectToWifiNetworkWithSSID:(NSString *)ssid password:(NSString *)password {
+  return [self connectToWifiNetworkWithSSID:ssid password:password isCancelled:nil];
+}
+
+- (BOOL)connectToWifiNetworkWithSSID:(NSString *)ssid
+                          password:(NSString *)password
+                       isCancelled:(BOOL (^_Nullable)(void))isCancelled {
   if (ssid.length == 0) {
     GNCLoggerError(@"SSID cannot be empty.");
     return NO;
@@ -88,65 +134,78 @@ static const UInt8 kConnectionToHostTimeoutInSeconds = 10;
   }
 
 #if TARGET_OS_IOS
-  __block BOOL connected = NO;
+  NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + kConnectionTimeoutInSeconds;
+  BOOL (^shouldStop)(void) = ^BOOL{
+    return (isCancelled && isCancelled()) || NSProcessInfo.processInfo.systemUptime >= deadline;
+  };
+  NSCondition *condition = GNCHotspotJoinCondition();
+  [condition lock];
+  // The bandwidth-upgrade handler already retries with backoff. Do not start a
+  // second OS apply, or spend a new attempt's consent budget waiting for an old one.
+  if (gPendingHotspotJoin || shouldStop()) {
+    [condition unlock];
+    return NO;
+  }
+  GNCHotspotJoinAttempt *attempt = [[GNCHotspotJoinAttempt alloc] init];
+  attempt.ssid = ssid;
+  gPendingHotspotJoin = attempt;
+  [condition unlock];
+
   NEHotspotConfiguration *config = [[NEHotspotConfiguration alloc] initWithSSID:ssid
                                                                      passphrase:password
                                                                           isWEP:NO];
-  config.joinOnce = YES;  // A temporary connection
+  config.joinOnce = YES;
+  [[NEHotspotConfigurationManager sharedManager]
+      applyConfiguration:config
+       completionHandler:^(NSError *_Nullable error) {
+         BOOL connected = error == nil ||
+             ([error.domain isEqualToString:NEHotspotConfigurationErrorDomain] &&
+              error.code == NEHotspotConfigurationErrorAlreadyAssociated);
+         if (connected) {
+           GNCLoggerInfo(@"Hotspot configuration applied");
+         } else {
+           GNCLoggerError(@"Hotspot connection failed: domain=%@ code=%ld", error.domain,
+                          (long)error.code);
+         }
+         [condition lock];
+         attempt.completed = YES;
+         attempt.connected = connected;
+         BOOL abandoned = attempt.abandoned;
+         [condition broadcast];
+         [condition unlock];
+         if (abandoned) {
+           // Clean up this late result before allowing another apply. Never let
+           // an old callback remove a newer operation's joinOnce configuration.
+           GNCFinishHotspotJoin(attempt, YES);
+         }
+       }];
 
-  dispatch_time_t timeout =
-      dispatch_time(DISPATCH_TIME_NOW, kConnectionTimeoutInSeconds * NSEC_PER_SEC);
-  for (UInt8 i = 0; i < kMaxRetryCount; i++) {
-    dispatch_semaphore_t semaphore_internal = dispatch_semaphore_create(0);
-    [[NEHotspotConfigurationManager sharedManager]
-        applyConfiguration:config
-         completionHandler:^(NSError *_Nullable error) {
-           if (error) {
-             if ([error.domain isEqualToString:NEHotspotConfigurationErrorDomain] &&
-                 error.code == NEHotspotConfigurationErrorAlreadyAssociated) {
-               GNCLoggerInfo(@"Already connected to %@", ssid);
-               connected = YES;
-             } else {
-               GNCLoggerError(@"Hotspot connection failed: domain=%@ code=%ld", error.domain,
-                              (long)error.code);
-             }
-           } else {
-             GNCLoggerInfo(@"Successfully connected to %@", ssid);
-             connected = YES;
-           }
-           dispatch_semaphore_signal(semaphore_internal);
-         }];
-    if (dispatch_semaphore_wait(semaphore_internal, timeout) != 0) {
-      // Timeout to connect to the hotspot. Technically, we should not reach here because the
-      // completion handler will be called even if it times out. But adding this log for debugging
-      // purpose.
-      GNCLoggerError(@"Hotspot connection timed out after %d seconds", kConnectionTimeoutInSeconds);
-      break;
-    }
-
-    if (connected) {
-      // Connected to the hotspot, no need to retry.
-      break;
-    }
+  [condition lock];
+  while (!attempt.completed && !shouldStop()) {
+    [condition waitUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
   }
+  if (shouldStop()) {
+    attempt.abandoned = YES;
+    BOOL completed = attempt.completed;
+    [condition unlock];
+    if (completed) GNCFinishHotspotJoin(attempt, YES);
+    // A still-pending apply owns the gate until its callback cleans up. Removing
+    // its configuration here cannot cancel the OS request and causes retry races.
+    GNCLoggerInfo(@"Hotspot connection wait cancelled or timed out");
+    return NO;
+  }
+  BOOL connected = attempt.connected;
+  [condition unlock];
 
-  // After the loop, if we believe we are connected, verify the SSID.
   if (connected) {
-    NSString *currentSSID = [self getCurrentWifiSSID];
-    if (currentSSID == nil) {
-      GNCLoggerInfo(@"Not able to get current SSID, assume connected");
-    } else if ([currentSSID isEqualToString:ssid]) {
-      GNCLoggerDebug(@"Connected to %@ successfully", ssid);
-    } else {
-      GNCLoggerError(@"Connected to wrong SSID: %@", currentSSID);
-      connected = NO;  // Still not connected to the right SSID
+    NSString *currentSSID = [self getCurrentWifiSSIDWithCancellation:shouldStop];
+    if (currentSSID != nil && ![currentSSID isEqualToString:ssid]) {
+      GNCLoggerError(@"Hotspot association verification failed");
+      connected = NO;
     }
   }
-
-  // If we failed to connect or connected to the wrong network, remove the configuration.
-  if (!connected) {
-    [[NEHotspotConfigurationManager sharedManager] removeConfigurationForSSID:ssid];
-  }
+  if (shouldStop()) connected = NO;
+  GNCFinishHotspotJoin(attempt, !connected);
   return connected;
 #elif TARGET_OS_OSX
   // MacOS treats access to Wi-Fi SSIDs and BSSIDs as location-sensitive information, so need to
@@ -255,6 +314,10 @@ static const UInt8 kConnectionToHostTimeoutInSeconds = 10;
 }
 
 - (NSString *)getCurrentWifiSSID {
+  return [self getCurrentWifiSSIDWithCancellation:nil];
+}
+
+- (NSString *)getCurrentWifiSSIDWithCancellation:(BOOL (^_Nullable)(void))isCancelled {
 #if TARGET_OS_IOS
   dispatch_semaphore_t semaphore_internal = dispatch_semaphore_create(0);
   __block NSString *networkSSID = nil;
@@ -295,14 +358,14 @@ static const UInt8 kConnectionToHostTimeoutInSeconds = 10;
     dispatch_semaphore_signal(semaphore_internal);
   }
 
-  dispatch_time_t timeout =
-      dispatch_time(DISPATCH_TIME_NOW, kConnectionToHostTimeoutInSeconds * NSEC_PER_SEC);
-  if (dispatch_semaphore_wait(semaphore_internal, timeout) != 0) {
-    GNCLoggerError(@"Getting current Wifi SSID timeout in %d seconds",
-                   kConnectionToHostTimeoutInSeconds);
+  NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + kConnectionToHostTimeoutInSeconds;
+  while (dispatch_semaphore_wait(semaphore_internal,
+                                 dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC)) != 0) {
+    if ((isCancelled && isCancelled()) || NSProcessInfo.processInfo.systemUptime >= deadline) {
+      return nil;
+    }
   }
-
-  return networkSSID;
+  return (isCancelled && isCancelled()) ? nil : networkSSID;
 #elif TARGET_OS_OSX
   return [CWWiFiClient sharedWiFiClient].interface.ssid;
 #else

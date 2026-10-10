@@ -57,6 +57,9 @@ class WifiHotspot {
   bool IsConnectedToHotspot() ABSL_LOCKS_EXCLUDED(mutex_);
   bool ConnectWifiHotspot(const HotspotCredentials& hotspot_credentials)
       ABSL_LOCKS_EXCLUDED(mutex_);
+  bool ConnectWifiHotspotWithCancellation(
+      const HotspotCredentials& hotspot_credentials,
+      CancellationFlag* cancellation_flag) ABSL_LOCKS_EXCLUDED(mutex_);
   bool DisconnectWifiHotspot() ABSL_LOCKS_EXCLUDED(mutex_);
 
   // Starts a worker thread, creates a WifiHotspot socket, associates it with a
