@@ -483,6 +483,7 @@ let package = Package(
         "internal/platform/error_code_recorder_test.cc",
         "internal/platform/future_test.cc",
         "internal/platform/cancellation_flag_test.cc",
+        "internal/platform/cancellation_scope_test.cc",
         "internal/platform/bluetooth_adapter_test.cc",
         "internal/platform/byte_utils_test.cc",
         "internal/platform/direct_executor_test.cc",
