@@ -192,6 +192,8 @@ void GNCEndWifiHotspotSession(NSString *identifier) {}
   NSCondition *condition = GNCHotspotJoinCondition();
   [condition lock];
   GNCHotspotConsentRun *run = gHotspotConsentRun;
+  // The app owns hotspot negotiation; no implicit SDK consent session.
+  if (!run || !run.active) { [condition unlock]; return NO; }
   NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + kConnectionTimeoutInSeconds;
   BOOL (^shouldStop)(void) = ^BOOL{
     return (isCancelled && isCancelled()) || (run && (!run.active || run.denied)) ||
